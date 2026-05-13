@@ -436,3 +436,19 @@ declare module '@claude-flow/mcp' {
   export const startMCPServer: any;
   export class MCPServer { constructor(...args: any[]); }
 }
+
+declare module '@claude-flow/memory' {
+  export const ControllerRegistry: any;
+  export const smartSearch: any;
+  const mod: any;
+  export default mod;
+}
+
+declare module '@ruvector/learning-wasm' {
+  export function initSync(opts: { module: BufferSource }): void;
+  export class WasmMicroLoRA { constructor(...args: any[]); [key: string]: any; }
+  export class WasmScopedLoRA { constructor(...args: any[]); [key: string]: any; }
+  export class WasmTrajectoryBuffer { constructor(...args: any[]); [key: string]: any; }
+  const mod: any;
+  export default mod;
+}
