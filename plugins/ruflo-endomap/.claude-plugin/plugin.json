@@ -1,0 +1,21 @@
+{
+  "name": "ruflo-endomap",
+  "description": "Endomap endometriosis symptom scoring — conduct an 8-dimension symptom assessment and render results on an interactive SVG body visualization showing pelvic pain, bowel/bladder, bleeding, bloating/nausea, back/leg pain, shoulder/chest pain, fatigue, and mental wellbeing",
+  "version": "0.1.0",
+  "author": {
+    "name": "syoung0351",
+    "url": "https://github.com/syoung0351"
+  },
+  "homepage": "https://github.com/syoung0351/ruflo",
+  "license": "MIT",
+  "keywords": [
+    "ruflo",
+    "endomap",
+    "endometriosis",
+    "symptoms",
+    "health",
+    "body-visualization",
+    "pain-tracking",
+    "html-artifact"
+  ]
+}
