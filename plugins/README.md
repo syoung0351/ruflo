@@ -1,6 +1,6 @@
 # Ruflo Plugins
 
-32 Claude Code plugins for agent-powered development workflows. Load with `--plugin-dir`.
+33 Claude Code plugins for agent-powered development workflows. Load with `--plugin-dir`.
 
 ## Quick Start
 
@@ -75,6 +75,7 @@ claude $(ls -d plugins/ruflo-*/ | sed 's|^|--plugin-dir |' | tr '\n' ' ')
 | [ruflo-iot-cognitum](ruflo-iot-cognitum/) | Cognitum Seed IoT — trust scoring, anomaly detection, fleet management |
 | [ruflo-neural-trader](ruflo-neural-trader/) | [`neural-trader`](https://npmjs.com/package/neural-trader) — 4 agents, LSTM/Transformer, Rust/NAPI backtesting, 112+ MCP tools |
 | [ruflo-market-data](ruflo-market-data/) | Market data ingestion, OHLCV vectorization, pattern matching |
+| [ruflo-endomap](ruflo-endomap/) | Endometriosis symptom scoring with 8-dimension endomap body visualization |
 
 ## Recommended Stacks
 
@@ -87,7 +88,7 @@ claude $(ls -d plugins/ruflo-*/ | sed 's|^|--plugin-dir |' | tr '\n' ' ')
 | Vector search | `ruflo-core` + `ruflo-ruvector` + `ruflo-rag-memory` + `ruflo-knowledge-graph` |
 | IoT development | `ruflo-core` + `ruflo-iot-cognitum` + `ruflo-agentdb` |
 | Trading systems | `ruflo-core` + `ruflo-neural-trader` + `ruflo-market-data` + `ruflo-ruvector` |
-| Full stack | All 32 plugins |
+| Full stack | All 33 plugins |
 
 ## npm Package Integration
 
@@ -137,7 +138,7 @@ claude plugin validate plugins/ruflo-<name>
 
 ## Verification & Discoverability
 
-Every MCP tool description across the 32 plugins must answer "use this over native (Bash/Read/Grep/Glob/Task/TodoWrite) when?" per [ADR-112](../v3/docs/adr/ADR-112-mcp-tool-discoverability.md). The rule is enforced by CI:
+Every MCP tool description across the 33 plugins must answer "use this over native (Bash/Read/Grep/Glob/Task/TodoWrite) when?" per [ADR-112](../v3/docs/adr/ADR-112-mcp-tool-discoverability.md). The rule is enforced by CI:
 
 ```bash
 # Run the audit (scans all MCPTool definitions across all plugins)
