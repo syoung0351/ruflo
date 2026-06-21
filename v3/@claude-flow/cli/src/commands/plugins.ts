@@ -2,6 +2,7 @@
  * V3 CLI Plugins Command
  * Plugin management, installation, and lifecycle
  * Now uses IPFS-based decentralized registry for discovery
+ * and supports GitHub-based marketplace sources.
  *
  * Created with ❤️ by ruv.io
  */
@@ -19,7 +20,11 @@ import {
   type PluginSearchOptions,
   type PluginType,
 } from '../plugins/store/index.js';
-import { getPluginManager, type InstalledPlugin } from '../plugins/manager.js';
+import {
+  getPluginManager,
+  type InstalledPlugin,
+  type MarketplaceSource,
+} from '../plugins/manager.js';
 import { getBulkRatings } from '../services/registry-api.js';
 
 // List subcommand - Now uses IPFS-based registry
@@ -64,7 +69,7 @@ const listCommand: Command = {
           output.writeln(output.dim('No plugins installed.'));
           output.writeln();
           output.writeln(output.dim('Run "claude-flow plugins list" to see available plugins'));
-          output.writeln(output.dim('Run "claude-flow plugins install -n <plugin>" to install'));
+          output.writeln(output.dim('Run "claude-flow plugins install <plugin>" to install'));
           return { success: true };
         }
 
@@ -205,12 +210,12 @@ const listCommand: Command = {
   },
 };
 
-// Install subcommand - Now fetches from IPFS registry
+// Install subcommand - supports -n flag OR positional args (batch)
 const installCommand: Command = {
   name: 'install',
-  description: 'Install a plugin from IPFS registry or local path',
+  description: 'Install one or more plugins from a marketplace source, IPFS registry, npm, or local path',
   options: [
-    { name: 'name', short: 'n', type: 'string', description: 'Plugin name or path', required: true },
+    { name: 'name', short: 'n', type: 'string', description: 'Plugin name or path (optional when using positional args)' },
     { name: 'version', short: 'v', type: 'string', description: 'Specific version to install' },
     { name: 'global', short: 'g', type: 'boolean', description: 'Install globally' },
     { name: 'dev', short: 'd', type: 'boolean', description: 'Install as dev dependency' },
@@ -218,105 +223,183 @@ const installCommand: Command = {
     { name: 'registry', short: 'r', type: 'string', description: 'Registry to use' },
   ],
   examples: [
-    { command: 'claude-flow plugins install -n community-analytics', description: 'Install plugin from IPFS' },
-    { command: 'claude-flow plugins install -n ./my-plugin --dev', description: 'Install local plugin' },
+    { command: 'claude-flow plugins install voltagent-infra voltagent-qa-sec voltagent-dev-exp', description: 'Batch install from marketplace' },
+    { command: 'claude-flow plugins install -n community-analytics', description: 'Install single plugin by flag' },
+    { command: 'claude-flow plugins install ./my-plugin', description: 'Install from local path' },
   ],
   action: async (ctx: CommandContext): Promise<CommandResult> => {
-    const name = ctx.flags.name as string;
+    const flagName = ctx.flags.name as string | undefined;
+    // Positional args come from ctx.args; filter out flag-like tokens defensively
+    const positionalArgs = ((ctx as Record<string, unknown>).args as string[] | undefined || []).filter(
+      (a: string) => !a.startsWith('-')
+    );
+    const names: string[] = flagName ? [flagName, ...positionalArgs] : positionalArgs;
+
     const version = ctx.flags.version as string || 'latest';
     const registryName = ctx.flags.registry as string;
     const verify = ctx.flags.verify !== false;
 
-    if (!name) {
-      output.printError('Plugin name is required');
+    if (names.length === 0) {
+      output.printError('Plugin name(s) required. Use -n <name> or provide names as arguments.');
+      output.writeln(output.dim('Example: claude-flow plugins install voltagent-infra voltagent-qa-sec'));
       return { success: false, exitCode: 1 };
     }
 
-    // Check if it's a local path
-    const isLocalPath = name.startsWith('./') || name.startsWith('/') || name.startsWith('../');
+    const manager = getPluginManager();
+    await manager.initialize();
 
-    output.writeln();
-    output.writeln(output.bold('Installing Plugin'));
-    output.writeln(output.dim('─'.repeat(50)));
-
-    const spinner = output.createSpinner({
-      text: isLocalPath ? `Installing from ${name}...` : `Discovering ${name} in registry...`,
-      spinner: 'dots'
-    });
-    spinner.start();
-
-    try {
-      const manager = getPluginManager();
-      await manager.initialize();
-
-      // Check if already installed
-      const existingPlugin = await manager.getPlugin(name);
-      if (existingPlugin) {
-        spinner.fail(`Plugin ${name} is already installed (v${existingPlugin.version})`);
-        output.writeln();
-        output.writeln(output.dim('Use "claude-flow plugins upgrade -n ' + name + '" to update'));
-        return { success: false, exitCode: 1 };
-      }
-
-      let result;
-      let plugin: PluginEntry | undefined;
-
-      if (isLocalPath) {
-        // Install from local path
-        spinner.setText(`Installing from ${name}...`);
-        result = await manager.installFromLocal(name);
-      } else {
-        // First, try to find in registry for metadata
-        spinner.setText(`Discovering ${name} in registry...`);
-        const discovery = createPluginDiscoveryService();
-        const registryResult = await discovery.discoverRegistry(registryName);
-
-        if (registryResult.success && registryResult.registry) {
-          plugin = registryResult.registry.plugins.find(p => p.name === name || p.id === name);
-        }
-
-        if (plugin) {
-          spinner.setText(`Found ${plugin.displayName} v${plugin.version}`);
-        }
-
-        // Install from npm (since IPFS is demo mode)
-        spinner.setText(`Installing ${name} from npm...`);
-        result = await manager.installFromNpm(name, version !== 'latest' ? version : undefined);
-      }
-
-      if (!result.success) {
-        spinner.fail(`Installation failed: ${result.error}`);
-        return { success: false, exitCode: 1 };
-      }
-
-      const installed = result.plugin!;
-      spinner.succeed(`Installed ${installed.name}@${installed.version}`);
+    // ── Single plugin: keep original detailed output ──────────────────────
+    if (names.length === 1) {
+      const name = names[0];
+      const isLocalPath = name.startsWith('./') || name.startsWith('/') || name.startsWith('../');
 
       output.writeln();
+      output.writeln(output.bold('Installing Plugin'));
+      output.writeln(output.dim('─'.repeat(50)));
 
-      const boxContent = [
-        `Plugin: ${installed.name}`,
-        `Version: ${installed.version}`,
-        `Source: ${installed.source}`,
-        `Path: ${installed.path || 'N/A'}`,
-        ``,
-        `Hooks registered: ${installed.hooks?.length || 0}`,
-        `Commands added: ${installed.commands?.length || 0}`,
-      ];
+      const spinner = output.createSpinner({
+        text: isLocalPath ? `Installing from ${name}...` : `Resolving ${name}...`,
+        spinner: 'dots'
+      });
+      spinner.start();
 
-      if (plugin) {
-        boxContent.push(`Trust: ${plugin.trustLevel}`);
-        boxContent.push(`Permissions: ${plugin.permissions.join(', ') || 'none'}`);
+      try {
+        const existingPlugin = await manager.getPlugin(name);
+        if (existingPlugin) {
+          spinner.fail(`Plugin ${name} is already installed (v${existingPlugin.version})`);
+          output.writeln();
+          output.writeln(output.dim('Use "claude-flow plugins upgrade -n ' + name + '" to update'));
+          return { success: false, exitCode: 1 };
+        }
+
+        let result;
+        let plugin: PluginEntry | undefined;
+
+        if (isLocalPath) {
+          spinner.setText(`Installing from ${name}...`);
+          result = await manager.installFromLocal(name);
+        } else {
+          // Resolve through marketplace sources first
+          const { installSpec, source: marketplaceSource } = await manager.resolveFromMarketplace(name);
+          if (marketplaceSource) {
+            spinner.setText(`Resolved ${name} from marketplace ${marketplaceSource}`);
+          }
+
+          // Also look in IPFS registry for metadata
+          try {
+            spinner.setText(`Checking IPFS registry for ${name}...`);
+            const discovery = createPluginDiscoveryService();
+            const registryResult = await discovery.discoverRegistry(registryName);
+            if (registryResult.success && registryResult.registry) {
+              plugin = registryResult.registry.plugins.find(p => p.name === name || p.id === name);
+            }
+          } catch {
+            // Registry lookup is informational only
+          }
+
+          if (plugin) {
+            spinner.setText(`Found ${plugin.displayName} v${plugin.version}`);
+          }
+
+          spinner.setText(`Installing ${installSpec} from npm...`);
+          result = await manager.installFromNpm(installSpec, version !== 'latest' ? version : undefined);
+        }
+
+        if (!result.success) {
+          spinner.fail(`Installation failed: ${result.error}`);
+          return { success: false, exitCode: 1 };
+        }
+
+        const installed = result.plugin!;
+        spinner.succeed(`Installed ${installed.name}@${installed.version}`);
+
+        output.writeln();
+
+        const boxContent = [
+          `Plugin: ${installed.name}`,
+          `Version: ${installed.version}`,
+          `Source: ${installed.source}`,
+          `Path: ${installed.path || 'N/A'}`,
+          ``,
+          `Hooks registered: ${installed.hooks?.length || 0}`,
+          `Commands added: ${installed.commands?.length || 0}`,
+        ];
+
+        if (plugin) {
+          boxContent.push(`Trust: ${plugin.trustLevel}`);
+          boxContent.push(`Permissions: ${plugin.permissions.join(', ') || 'none'}`);
+        }
+
+        output.printBox(boxContent.join('\n'), 'Installation Complete');
+
+        return { success: true, data: installed };
+      } catch (error) {
+        spinner.fail('Installation failed');
+        output.printError(`Error: ${String(error)}`);
+        return { success: false, exitCode: 1 };
       }
-
-      output.printBox(boxContent.join('\n'), 'Installation Complete');
-
-      return { success: true, data: installed };
-    } catch (error) {
-      spinner.fail('Installation failed');
-      output.printError(`Error: ${String(error)}`);
-      return { success: false, exitCode: 1 };
     }
+
+    // ── Batch install: multiple plugin names ──────────────────────────────
+    output.writeln();
+    output.writeln(output.bold(`Installing ${names.length} plugins`));
+    output.writeln(output.dim('─'.repeat(50)));
+
+    const results: { name: string; success: boolean; version?: string; error?: string }[] = [];
+
+    for (const name of names) {
+      const isLocalPath = name.startsWith('./') || name.startsWith('/') || name.startsWith('../');
+      const spinner = output.createSpinner({ text: `Installing ${name}...`, spinner: 'dots' });
+      spinner.start();
+
+      try {
+        const existing = await manager.getPlugin(name);
+        if (existing) {
+          spinner.warn(`${name} already installed (v${existing.version})`);
+          results.push({ name, success: true, version: existing.version });
+          continue;
+        }
+
+        let result;
+        if (isLocalPath) {
+          result = await manager.installFromLocal(name);
+        } else {
+          // Resolve name through registered marketplace sources
+          const { installSpec, source: marketplaceSource } = await manager.resolveFromMarketplace(name);
+          if (marketplaceSource) {
+            spinner.setText(`Installing ${installSpec} (from ${marketplaceSource})...`);
+          } else {
+            spinner.setText(`Installing ${installSpec}...`);
+          }
+          result = await manager.installFromNpm(installSpec, version !== 'latest' ? version : undefined);
+        }
+
+        if (result.success && result.plugin) {
+          spinner.succeed(`${name}@${result.plugin.version}`);
+          results.push({ name, success: true, version: result.plugin.version });
+        } else {
+          spinner.fail(`${name}: ${result.error}`);
+          results.push({ name, success: false, error: result.error });
+        }
+      } catch (error) {
+        spinner.fail(`${name}: ${String(error)}`);
+        results.push({ name, success: false, error: String(error) });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+
+    output.writeln();
+    if (failCount === 0) {
+      output.writeln(output.success(`All ${successCount} plugin(s) installed successfully`));
+    } else {
+      output.writeln(`Installed: ${successCount}/${names.length}`);
+      const failed = results.filter(r => !r.success).map(r => r.name);
+      output.writeln(output.dim(`Failed: ${failed.join(', ')}`));
+    }
+
+    return { success: failCount === 0, data: results };
   },
 };
 
@@ -886,32 +969,222 @@ const rateCommand: Command = {
   },
 };
 
-// Main plugins command - Now with IPFS-based registry
+// ============================================================================
+// Marketplace subcommand — manage GitHub-based plugin sources
+// ============================================================================
+
+const marketplaceAddCommand: Command = {
+  name: 'add',
+  description: 'Register a GitHub repository as a plugin marketplace source',
+  options: [
+    { name: 'source', short: 's', type: 'string', description: 'GitHub owner/repo URI (alternative to positional arg)' },
+  ],
+  examples: [
+    { command: 'claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents', description: 'Add VoltAgent marketplace' },
+    { command: 'claude-flow plugins marketplace add myorg/claude-plugins', description: 'Add custom org marketplace' },
+  ],
+  action: async (ctx: CommandContext): Promise<CommandResult> => {
+    const positional = ((ctx as Record<string, unknown>).args as string[] | undefined || []);
+    const uri = (positional[0] || ctx.flags.source) as string | undefined;
+
+    if (!uri) {
+      output.printError('Marketplace URI required (e.g. VoltAgent/awesome-claude-code-subagents)');
+      output.writeln(output.dim('Usage: claude-flow plugins marketplace add <owner/repo>'));
+      return { success: false, exitCode: 1 };
+    }
+
+    const spinner = output.createSpinner({
+      text: `Adding marketplace source: ${uri}...`,
+      spinner: 'dots',
+    });
+    spinner.start();
+
+    try {
+      const manager = getPluginManager();
+      await manager.initialize();
+      const result = await manager.addMarketplaceSource(uri);
+
+      if (!result.success) {
+        spinner.fail(result.error || 'Failed to add marketplace source');
+        return { success: false, exitCode: 1 };
+      }
+
+      if ((result.pluginCount ?? 0) > 0) {
+        spinner.succeed(`Added marketplace "${uri}" — ${result.pluginCount} plugin(s) catalogued`);
+      } else {
+        spinner.succeed(`Added marketplace "${uri}"`);
+        output.writeln(output.dim('  No claude-flow-registry.json found; plugins resolved by name at install time.'));
+      }
+
+      output.writeln();
+      output.writeln(output.dim('Install plugins from this source:'));
+      output.writeln(output.dim(`  claude-flow plugins install <plugin-name>`));
+
+      return { success: true, data: result.source };
+    } catch (error) {
+      spinner.fail('Failed to add marketplace source');
+      output.printError(`Error: ${String(error)}`);
+      return { success: false, exitCode: 1 };
+    }
+  },
+};
+
+const marketplaceListCommand: Command = {
+  name: 'list',
+  description: 'List registered marketplace sources',
+  options: [],
+  examples: [
+    { command: 'claude-flow plugins marketplace list', description: 'List all sources' },
+  ],
+  action: async (_ctx: CommandContext): Promise<CommandResult> => {
+    try {
+      const manager = getPluginManager();
+      await manager.initialize();
+      const sources = await manager.getMarketplaceSources();
+
+      output.writeln();
+      output.writeln(output.bold('Registered Marketplace Sources'));
+      output.writeln(output.dim('─'.repeat(60)));
+
+      if (sources.length === 0) {
+        output.writeln(output.dim('No marketplace sources registered.'));
+        output.writeln(output.dim('Add one: claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents'));
+        return { success: true, data: [] };
+      }
+
+      output.printTable({
+        columns: [
+          { key: 'uri', header: 'Source (owner/repo)', width: 42 },
+          { key: 'type', header: 'Type', width: 8 },
+          { key: 'plugins', header: 'Plugins', width: 8, align: 'right' },
+          { key: 'fetched', header: 'Fetched', width: 22 },
+        ],
+        data: sources.map((s: MarketplaceSource) => ({
+          uri: s.uri,
+          type: s.type,
+          plugins: String(s.plugins.length),
+          fetched: s.lastFetched ? new Date(s.lastFetched).toLocaleString() : 'not fetched',
+        })),
+      });
+
+      return { success: true, data: sources };
+    } catch (error) {
+      output.printError(`Error: ${String(error)}`);
+      return { success: false, exitCode: 1 };
+    }
+  },
+};
+
+const marketplaceRemoveCommand: Command = {
+  name: 'remove',
+  description: 'Remove a registered marketplace source',
+  options: [
+    { name: 'source', short: 's', type: 'string', description: 'Marketplace URI or name to remove' },
+  ],
+  examples: [
+    { command: 'claude-flow plugins marketplace remove VoltAgent/awesome-claude-code-subagents', description: 'Remove VoltAgent marketplace' },
+  ],
+  action: async (ctx: CommandContext): Promise<CommandResult> => {
+    const positional = ((ctx as Record<string, unknown>).args as string[] | undefined || []);
+    const uri = (positional[0] || ctx.flags.source) as string | undefined;
+
+    if (!uri) {
+      output.printError('Marketplace URI required');
+      return { success: false, exitCode: 1 };
+    }
+
+    try {
+      const manager = getPluginManager();
+      await manager.initialize();
+      const result = await manager.removeMarketplaceSource(uri);
+
+      if (!result.success) {
+        output.printError(result.error || 'Failed to remove marketplace source');
+        return { success: false, exitCode: 1 };
+      }
+
+      output.writeln(output.success(`Removed marketplace source: ${uri}`));
+      return { success: true };
+    } catch (error) {
+      output.printError(`Error: ${String(error)}`);
+      return { success: false, exitCode: 1 };
+    }
+  },
+};
+
+const marketplaceCommand: Command = {
+  name: 'marketplace',
+  description: 'Manage GitHub-based plugin marketplace sources',
+  subcommands: [marketplaceAddCommand, marketplaceListCommand, marketplaceRemoveCommand],
+  examples: [
+    { command: 'claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents', description: 'Add VoltAgent marketplace' },
+    { command: 'claude-flow plugins marketplace list', description: 'List all sources' },
+    { command: 'claude-flow plugins marketplace remove VoltAgent/awesome-claude-code-subagents', description: 'Remove a source' },
+  ],
+  action: async (_ctx: CommandContext): Promise<CommandResult> => {
+    output.writeln();
+    output.writeln(output.bold('Plugin Marketplace'));
+    output.writeln(output.dim('Manage GitHub repositories as plugin sources'));
+    output.writeln();
+    output.writeln('Subcommands:');
+    output.printList([
+      `${output.highlight('add')}    <owner/repo>  Register a GitHub repo as a marketplace source`,
+      `${output.highlight('list')}               Show all registered sources`,
+      `${output.highlight('remove')} <owner/repo>  Deregister a source`,
+    ]);
+    output.writeln();
+    output.writeln(output.bold('Example workflow:'));
+    output.writeln(output.dim('  claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents'));
+    output.writeln(output.dim('  claude-flow plugins install voltagent-infra voltagent-qa-sec voltagent-dev-exp'));
+    return { success: true };
+  },
+};
+
+// Main plugins command - Now with IPFS-based registry and marketplace support
 export const pluginsCommand: Command = {
   name: 'plugins',
-  description: 'Plugin management with IPFS-based decentralized registry',
-  subcommands: [listCommand, searchCommand, installCommand, uninstallCommand, upgradeCommand, toggleCommand, infoCommand, createCommand, rateCommand],
+  description: 'Plugin management with IPFS-based decentralized registry and GitHub marketplace sources',
+  subcommands: [
+    listCommand,
+    searchCommand,
+    installCommand,
+    uninstallCommand,
+    upgradeCommand,
+    toggleCommand,
+    infoCommand,
+    createCommand,
+    rateCommand,
+    marketplaceCommand,
+  ],
   examples: [
     { command: 'claude-flow plugins list', description: 'List plugins from IPFS registry' },
     { command: 'claude-flow plugins search -q neural', description: 'Search for plugins' },
-    { command: 'claude-flow plugins install -n community-analytics', description: 'Install from IPFS' },
+    { command: 'claude-flow plugins install voltagent-infra voltagent-qa-sec', description: 'Batch install from marketplace' },
+    { command: 'claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents', description: 'Add VoltAgent marketplace' },
     { command: 'claude-flow plugins create -n my-plugin', description: 'Create new plugin' },
   ],
   action: async (): Promise<CommandResult> => {
     output.writeln();
     output.writeln(output.bold('RuFlo Plugin System'));
-    output.writeln(output.dim('Decentralized plugin marketplace via IPFS'));
+    output.writeln(output.dim('Decentralized plugin marketplace via IPFS + GitHub marketplace sources'));
     output.writeln();
     output.writeln('Subcommands:');
     output.printList([
-      `${output.highlight('list')}      - List plugins from IPFS registry`,
-      `${output.highlight('search')}    - Search plugins by query`,
-      `${output.highlight('install')}   - Install a plugin from npm or local path`,
-      `${output.highlight('uninstall')} - Remove an installed plugin`,
-      `${output.highlight('upgrade')}   - Upgrade an installed plugin`,
-      `${output.highlight('toggle')}    - Enable or disable a plugin`,
-      `${output.highlight('info')}      - Show detailed plugin information`,
-      `${output.highlight('create')}    - Scaffold a new plugin project`,
+      `${output.highlight('list')}        - List plugins from IPFS registry`,
+      `${output.highlight('search')}      - Search plugins by query`,
+      `${output.highlight('install')}     - Install plugin(s) from marketplace, npm, or local path`,
+      `${output.highlight('uninstall')}   - Remove an installed plugin`,
+      `${output.highlight('upgrade')}     - Upgrade an installed plugin`,
+      `${output.highlight('toggle')}      - Enable or disable a plugin`,
+      `${output.highlight('info')}        - Show detailed plugin information`,
+      `${output.highlight('create')}      - Scaffold a new plugin project`,
+      `${output.highlight('marketplace')} - Manage GitHub-based marketplace sources`,
+    ]);
+    output.writeln();
+    output.writeln(output.bold('Marketplace workflow:'));
+    output.printList([
+      'claude-flow plugins marketplace add VoltAgent/awesome-claude-code-subagents',
+      'claude-flow plugins install voltagent-infra voltagent-qa-sec voltagent-dev-exp',
     ]);
     output.writeln();
     output.writeln(output.bold('IPFS-Based Features:'));

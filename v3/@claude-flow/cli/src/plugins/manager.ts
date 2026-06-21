@@ -6,6 +6,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -37,10 +38,29 @@ export interface InstalledPlugin {
   config?: Record<string, unknown>;
 }
 
+export interface MarketplacePlugin {
+  name: string;
+  displayName: string;
+  description: string;
+  version: string;
+  installSpec: string;
+  tags?: string[];
+}
+
+export interface MarketplaceSource {
+  type: 'github' | 'url';
+  uri: string;
+  name: string;
+  addedAt: string;
+  lastFetched?: string;
+  plugins: MarketplacePlugin[];
+}
+
 export interface InstalledPluginsManifest {
   version: '1.0.0';
   lastUpdated: string;
   plugins: Record<string, InstalledPlugin>;
+  marketplaceSources?: MarketplaceSource[];
 }
 
 export interface PluginManagerConfig {
@@ -60,6 +80,7 @@ export interface PluginManagerConfig {
  * - Downloads from npm
  * - Tracks enabled/disabled state
  * - Loads plugin modules
+ * - Manages marketplace sources (GitHub repositories as plugin catalogs)
  */
 export class PluginManager {
   private config: PluginManagerConfig;
@@ -77,14 +98,8 @@ export class PluginManager {
   // Initialization
   // =========================================================================
 
-  /**
-   * Initialize the plugin manager, creating directories and loading manifest
-   */
   async initialize(): Promise<void> {
-    // Ensure plugins directory exists
     await this.ensureDirectory(this.config.pluginsDir);
-
-    // Load or create manifest
     this.manifest = await this.loadManifest();
   }
 
@@ -108,6 +123,7 @@ export class PluginManager {
       version: '1.0.0',
       lastUpdated: new Date().toISOString(),
       plugins: {},
+      marketplaceSources: [],
     };
   }
 
@@ -122,6 +138,131 @@ export class PluginManager {
       JSON.stringify(this.manifest, null, 2),
       'utf-8'
     );
+  }
+
+  // =========================================================================
+  // Marketplace Source Management
+  // =========================================================================
+
+  /**
+   * Add a GitHub repository as a marketplace plugin source.
+   * Attempts to fetch claude-flow-registry.json from the repo root.
+   */
+  async addMarketplaceSource(
+    uri: string
+  ): Promise<{ success: boolean; source?: MarketplaceSource; error?: string; pluginCount?: number }> {
+    if (!this.manifest) await this.initialize();
+
+    if (!this.manifest!.marketplaceSources) {
+      this.manifest!.marketplaceSources = [];
+    }
+
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(uri)) {
+      return {
+        success: false,
+        error: `Invalid marketplace URI. Expected format: owner/repo (e.g. VoltAgent/awesome-claude-code-subagents)`,
+      };
+    }
+
+    if (this.manifest!.marketplaceSources.some(s => s.uri === uri)) {
+      return { success: false, error: `Marketplace source "${uri}" is already registered` };
+    }
+
+    const repoName = uri.split('/')[1] || uri;
+    const source: MarketplaceSource = {
+      type: 'github',
+      uri,
+      name: repoName,
+      addedAt: new Date().toISOString(),
+      plugins: [],
+    };
+
+    const catalog = await this.fetchGitHubRegistry(uri);
+    if (catalog && Array.isArray(catalog.plugins)) {
+      source.plugins = catalog.plugins;
+      source.lastFetched = new Date().toISOString();
+    }
+
+    this.manifest!.marketplaceSources.push(source);
+    await this.saveManifest();
+
+    return { success: true, source, pluginCount: source.plugins.length };
+  }
+
+  /**
+   * Remove a registered marketplace source by URI or name.
+   */
+  async removeMarketplaceSource(uri: string): Promise<{ success: boolean; error?: string }> {
+    if (!this.manifest) await this.initialize();
+
+    const sources = this.manifest!.marketplaceSources || [];
+    const idx = sources.findIndex(s => s.uri === uri || s.name === uri);
+    if (idx === -1) {
+      return { success: false, error: `Marketplace source "${uri}" is not registered` };
+    }
+
+    sources.splice(idx, 1);
+    this.manifest!.marketplaceSources = sources;
+    await this.saveManifest();
+
+    return { success: true };
+  }
+
+  /**
+   * List all registered marketplace sources.
+   */
+  async getMarketplaceSources(): Promise<MarketplaceSource[]> {
+    if (!this.manifest) await this.initialize();
+    return this.manifest!.marketplaceSources || [];
+  }
+
+  /**
+   * Resolve a plugin name to an install spec by checking marketplace sources.
+   * Returns the installSpec from the first matching source, or the name itself
+   * as a fallback (direct npm install).
+   */
+  async resolveFromMarketplace(
+    name: string
+  ): Promise<{ installSpec: string; source?: string }> {
+    const sources = await this.getMarketplaceSources();
+    for (const source of sources) {
+      const found = source.plugins.find(
+        p => p.name === name || p.installSpec === name || p.name.endsWith(`/${name}`)
+      );
+      if (found) {
+        return { installSpec: found.installSpec, source: source.uri };
+      }
+    }
+    return { installSpec: name };
+  }
+
+  /**
+   * Fetch claude-flow-registry.json from a GitHub repository (HTTPS, no deps).
+   * Returns null if the file doesn't exist or the request fails.
+   */
+  private fetchGitHubRegistry(
+    ownerRepo: string
+  ): Promise<{ plugins: MarketplacePlugin[] } | null> {
+    const url = `https://raw.githubusercontent.com/${ownerRepo}/main/claude-flow-registry.json`;
+    return new Promise(resolve => {
+      const req = https.get(url, { timeout: 10000 }, res => {
+        if (res.statusCode !== 200) {
+          resolve(null);
+          return;
+        }
+        let data = '';
+        res.on('data', (chunk: string) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data) as { plugins: MarketplacePlugin[] });
+          } catch {
+            resolve(null);
+          }
+        });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
   }
 
   // =========================================================================
